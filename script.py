@@ -42,6 +42,13 @@ MILITARY_HINTS = {
     "government", "nato", "wojsko", "marynarka", "sily powietrzne",
 }
 
+CATEGORY_EMOJI = {
+    "military": "⚫️",
+    "bizjet": "🟡",
+    "cargo": "🟤",
+    "passenger": "⚪",
+}
+
 
 def classify_flight(aircraft_info):
     owner = (aircraft_info.get("RegisteredOwners") or "").lower()
@@ -155,8 +162,9 @@ def main():
         model = model or "модель неизвестна"
         dep = get_airport_name(flight.get("estDepartureAirport"))
         callsign = (flight.get("callsign") or "").strip() or "без позывного"
+        emoji = CATEGORY_EMOJI.get(category, "⚪")
         text = (
-            f"🛬 <b>Посадка в Варшаве (EPWA)</b>\n"
+            f"{emoji} 🛬 <b>Посадка в Варшаве (EPWA)</b>\n"
             f"Категория: {category}\n"
             f"Рейс: {callsign}\n"
             f"Самолёт: {model}\n"
@@ -175,8 +183,9 @@ def main():
         model = model or "модель неизвестна"
         arr = get_airport_name(flight.get("estArrivalAirport"))
         callsign = (flight.get("callsign") or "").strip() or "без позывного"
+        emoji = CATEGORY_EMOJI.get(category, "⚪")
         text = (
-            f"🛫 <b>Вылет из Варшавы (EPWA)</b>\n"
+            f"{emoji} 🛫 <b>Вылет из Варшавы (EPWA)</b>\n"
             f"Категория: {category}\n"
             f"Рейс: {callsign}\n"
             f"Самолёт: {model}\n"
