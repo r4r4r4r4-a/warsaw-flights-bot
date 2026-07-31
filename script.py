@@ -5,7 +5,7 @@ import requests
 
 AIRPORT = "EPWA"  # Варшава, Шопена
 STATE_FILE = "state.json"
-WINDOW_MINUTES = 20  # окно проверки назад (с запасом, чтобы не пропустить рейсы)
+WINDOW_MINUTES = 90  # окно проверки назад (посадки у OpenSky появляются с задержкой до ~60 мин)
 MAX_STATE_IDS = 1000  # сколько ID держим в памяти, чтобы файл не рос бесконечно
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
