@@ -1,9 +1,8 @@
 name: Warsaw Airport Flights Bot
-# nudge to refresh schedule
+# scheduling handled externally by cron-job.org via workflow_dispatch,
+# native GitHub schedule removed to avoid double-triggering
 
 on:
-  schedule:
-    - cron: "3,8,13,18,23,28,33,38,43,48,53,58 * * * *"
   workflow_dispatch:
 
 concurrency:
@@ -43,5 +42,4 @@ jobs:
           git config user.email "actions@github.com"
           git add state.json
           git diff --quiet && git diff --staged --quiet || git commit -m "Update sent flights state"
-          git pull --rebase origin main
           git push
