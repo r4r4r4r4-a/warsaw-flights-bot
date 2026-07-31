@@ -9,7 +9,8 @@ WINDOW_MINUTES = 20  # окно проверки назад (с запасом, 
 MAX_STATE_IDS = 1000  # сколько ID держим в памяти, чтобы файл не рос бесконечно
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+# Можно указать несколько ID через запятую, например: 111111111,222222222
+CHAT_IDS = [c.strip() for c in os.environ["TELEGRAM_CHAT_ID"].split(",") if c.strip()]
 OPENSKY_CLIENT_ID = os.environ["OPENSKY_CLIENT_ID"]
 OPENSKY_CLIENT_SECRET = os.environ["OPENSKY_CLIENT_SECRET"]
 
@@ -107,7 +108,7 @@ def get_aircraft_info(icao24):
 
 def get_airport_name(icao):
     if not icao:
-        return "неизвестно (сигнал потерян)"
+        return None
     try:
         r = requests.get(f"https://hexdb.io/api/v1/airport/icao/{icao}", timeout=10)
         if r.status_code == 200:
@@ -120,15 +121,46 @@ def get_airport_name(icao):
     return icao
 
 
+def degrees_to_compass(deg):
+    directions = [
+        "север", "северо-восток", "восток", "юго-восток",
+        "юг", "юго-запад", "запад", "северо-запад",
+    ]
+    idx = round(deg / 45) % 8
+    return directions[idx]
+
+
+def get_last_heading(token, icao24):
+    """Возвращает последний известный курс полёта (компас), если есть."""
+    try:
+        headers = {"Authorization": f"Bearer {token}"}
+        params = {"icao24": icao24, "time": 0}
+        r = requests.get(
+            "https://opensky-network.org/api/tracks/all",
+            headers=headers, params=params, timeout=15,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            path = data.get("path") or []
+            for point in reversed(path):
+                # point: [time, lat, lon, baro_altitude, true_track, on_ground]
+                if len(point) > 4 and point[4] is not None:
+                    return degrees_to_compass(point[4])
+    except Exception:
+        pass
+    return None
+
+
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    r = requests.post(
-        url,
-        data={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"},
-        timeout=15,
-    )
-    if r.status_code != 200:
-        print("Telegram error:", r.text)
+    for chat_id in CHAT_IDS:
+        r = requests.post(
+            url,
+            data={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+            timeout=15,
+        )
+        if r.status_code != 200:
+            print(f"Telegram error for chat {chat_id}:", r.text)
 
 
 def fetch_flights(token, kind):
@@ -161,6 +193,9 @@ def main():
             continue
         model = model or "модель неизвестна"
         dep = get_airport_name(flight.get("estDepartureAirport"))
+        if not dep:
+            heading = get_last_heading(token, flight["icao24"])
+            dep = f"курс {heading}" if heading else "нет данных"
         callsign = (flight.get("callsign") or "").strip() or "без позывного"
         emoji = CATEGORY_EMOJI.get(category, "⚪")
         text = (
@@ -182,6 +217,9 @@ def main():
             continue
         model = model or "модель неизвестна"
         arr = get_airport_name(flight.get("estArrivalAirport"))
+        if not arr:
+            heading = get_last_heading(token, flight["icao24"])
+            arr = f"курс {heading}" if heading else "нет данных"
         callsign = (flight.get("callsign") or "").strip() or "без позывного"
         emoji = CATEGORY_EMOJI.get(category, "⚪")
         text = (
