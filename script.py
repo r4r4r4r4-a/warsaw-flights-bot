@@ -3,10 +3,16 @@ import json
 import time
 import requests
 
-AIRPORT = "EPWA"  # Варшава, Шопена
+# Координаты аэропорта им. Шопена (EPWA), Варшава
+AIRPORT_ICAO = "EPWA"
+AIRPORT_LAT = 52.1657
+AIRPORT_LON = 20.9671
+BOX_LAT_PAD = 0.09   # ~10 км по широте
+BOX_LON_PAD = 0.14   # ~10 км по долготе на этой широте
+
 STATE_FILE = "state.json"
-WINDOW_MINUTES = 90  # окно проверки назад (посадки у OpenSky появляются с задержкой до ~60 мин)
-MAX_STATE_IDS = 1000  # сколько ID держим в памяти, чтобы файл не рос бесконечно
+MAX_TRACKED = 500          # сколько бортов помним между запусками
+STALE_SECONDS = 60 * 60    # если борт не виден дольше часа - забываем про него
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 # Можно указать несколько ID через запятую, например: 111111111,222222222
@@ -80,11 +86,23 @@ def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r") as f:
             return json.load(f)
-    return {"sent_ids": []}
+    return {"tracked": {}}
 
 
 def save_state(state):
-    state["sent_ids"] = state["sent_ids"][-MAX_STATE_IDS:]
+    now = time.time()
+    tracked = state.get("tracked", {})
+    # чистим борта, которых давно не видно
+    tracked = {
+        icao: info for icao, info in tracked.items()
+        if now - info.get("last_seen", 0) < STALE_SECONDS
+    }
+    # ограничение на размер на всякий случай
+    if len(tracked) > MAX_TRACKED:
+        # оставляем самых недавно виденных
+        items = sorted(tracked.items(), key=lambda kv: kv[1].get("last_seen", 0), reverse=True)
+        tracked = dict(items[:MAX_TRACKED])
+    state["tracked"] = tracked
     with open(STATE_FILE, "w") as f:
         json.dump(state, f)
 
@@ -106,21 +124,6 @@ def get_aircraft_info(icao24):
     return None, "passenger"
 
 
-def get_airport_name(icao):
-    if not icao:
-        return None
-    try:
-        r = requests.get(f"https://hexdb.io/api/v1/airport/icao/{icao}", timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            name = data.get("airport")
-            if name:
-                return f"{name} ({icao})"
-    except Exception:
-        pass
-    return icao
-
-
 def degrees_to_compass(deg):
     directions = [
         "север", "северо-восток", "восток", "юго-восток",
@@ -128,27 +131,6 @@ def degrees_to_compass(deg):
     ]
     idx = round(deg / 45) % 8
     return directions[idx]
-
-
-def get_last_heading(token, icao24):
-    """Возвращает последний известный курс полёта (компас), если есть."""
-    try:
-        headers = {"Authorization": f"Bearer {token}"}
-        params = {"icao24": icao24, "time": 0}
-        r = requests.get(
-            "https://opensky-network.org/api/tracks/all",
-            headers=headers, params=params, timeout=15,
-        )
-        if r.status_code == 200:
-            data = r.json()
-            path = data.get("path") or []
-            for point in reversed(path):
-                # point: [time, lat, lon, baro_altitude, true_track, on_ground]
-                if len(point) > 4 and point[4] is not None:
-                    return degrees_to_compass(point[4])
-    except Exception:
-        pass
-    return None
 
 
 def send_telegram(text):
@@ -163,81 +145,88 @@ def send_telegram(text):
             print(f"Telegram error for chat {chat_id}:", r.text)
 
 
-def fetch_flights(token, kind):
-    now = int(time.time())
-    begin = now - WINDOW_MINUTES * 60
-    url = f"https://opensky-network.org/api/flights/{kind}"
+def fetch_states_near_airport(token):
     headers = {"Authorization": f"Bearer {token}"}
-    params = {"airport": AIRPORT, "begin": begin, "end": now}
-    r = requests.get(url, headers=headers, params=params, timeout=20)
-    if r.status_code == 404:
-        return []
+    params = {
+        "lamin": AIRPORT_LAT - BOX_LAT_PAD,
+        "lamax": AIRPORT_LAT + BOX_LAT_PAD,
+        "lomin": AIRPORT_LON - BOX_LON_PAD,
+        "lomax": AIRPORT_LON + BOX_LON_PAD,
+    }
+    r = requests.get(
+        "https://opensky-network.org/api/states/all",
+        headers=headers, params=params, timeout=20,
+    )
     r.raise_for_status()
-    return r.json()
+    data = r.json()
+    return data.get("states") or []
 
 
 def main():
     state = load_state()
-    sent = set(state["sent_ids"])
+    tracked = state.get("tracked", {})
     token = get_opensky_token()
+    now = time.time()
 
+    states = fetch_states_near_airport(token)
     new_events = []
+    seen_this_run = set()
 
-    for flight in fetch_flights(token, "arrival"):
-        fid = f"arr-{flight['icao24']}-{flight.get('lastSeen')}"
-        if fid in sent:
+    for s in states:
+        icao24 = s[0]
+        callsign = (s[1] or "").strip() or "без позывного"
+        on_ground = s[8]
+        true_track = s[10]
+        if icao24 is None or on_ground is None:
             continue
-        sent.add(fid)
-        model, category = get_aircraft_info(flight["icao24"])
-        if category not in WATCH_CATEGORIES:
-            continue
-        model = model or "модель неизвестна"
-        dep = get_airport_name(flight.get("estDepartureAirport"))
-        if not dep:
-            heading = get_last_heading(token, flight["icao24"])
-            dep = f"курс {heading}" if heading else "нет данных"
-        callsign = (flight.get("callsign") or "").strip() or "без позывного"
-        emoji = CATEGORY_EMOJI.get(category, "⚪")
-        text = (
-            f"{emoji} 🛬 <b>Посадка в Варшаве (EPWA)</b>\n"
-            f"Категория: {category}\n"
-            f"Рейс: {callsign}\n"
-            f"Самолёт: {model}\n"
-            f"Откуда: {dep}"
-        )
-        new_events.append(text)
 
-    for flight in fetch_flights(token, "departure"):
-        fid = f"dep-{flight['icao24']}-{flight.get('firstSeen')}"
-        if fid in sent:
-            continue
-        sent.add(fid)
-        model, category = get_aircraft_info(flight["icao24"])
-        if category not in WATCH_CATEGORIES:
-            continue
-        model = model or "модель неизвестна"
-        arr = get_airport_name(flight.get("estArrivalAirport"))
-        if not arr:
-            heading = get_last_heading(token, flight["icao24"])
-            arr = f"курс {heading}" if heading else "нет данных"
-        callsign = (flight.get("callsign") or "").strip() or "без позывного"
-        emoji = CATEGORY_EMOJI.get(category, "⚪")
-        text = (
-            f"{emoji} 🛫 <b>Вылет из Варшавы (EPWA)</b>\n"
-            f"Категория: {category}\n"
-            f"Рейс: {callsign}\n"
-            f"Самолёт: {model}\n"
-            f"Куда: {arr}"
-        )
-        new_events.append(text)
+        seen_this_run.add(icao24)
+        prev = tracked.get(icao24)
+        was_on_ground = prev.get("on_ground") if prev else None
+
+        event_kind = None
+        if was_on_ground is True and on_ground is False:
+            event_kind = "departure"
+        elif was_on_ground is False and on_ground is True:
+            event_kind = "arrival"
+
+        tracked[icao24] = {"on_ground": on_ground, "last_seen": now}
+
+        if event_kind:
+            model, category = get_aircraft_info(icao24)
+            if category not in WATCH_CATEGORIES:
+                continue
+            model = model or "модель неизвестна"
+            heading = degrees_to_compass(true_track) if true_track is not None else None
+            emoji = CATEGORY_EMOJI.get(category, "⚪")
+
+            if event_kind == "departure":
+                direction = f"курс {heading}" if heading else "нет данных"
+                text = (
+                    f"{emoji} 🛫 <b>Вылет из Варшавы (EPWA)</b>\n"
+                    f"Категория: {category}\n"
+                    f"Рейс: {callsign}\n"
+                    f"Самолёт: {model}\n"
+                    f"Куда: {direction}"
+                )
+            else:
+                direction = f"курс {heading}" if heading else "нет данных"
+                text = (
+                    f"{emoji} 🛬 <b>Посадка в Варшаве (EPWA)</b>\n"
+                    f"Категория: {category}\n"
+                    f"Рейс: {callsign}\n"
+                    f"Самолёт: {model}\n"
+                    f"Откуда: {direction}"
+                )
+            new_events.append(text)
 
     for text in new_events:
         send_telegram(text)
         time.sleep(1)
 
-    state["sent_ids"] = list(sent)
+    state["tracked"] = tracked
     save_state(state)
-    print(f"Отправлено новых событий: {len(new_events)}")
+    print(f"Бортов рядом с аэропортом: {len(states)}, новых событий: {len(new_events)}")
 
 
 if __name__ == "__main__":
