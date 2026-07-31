@@ -13,6 +13,7 @@ BOX_LON_PAD = 0.22   # ~16 км по долготе на этой широте
 STATE_FILE = "state.json"
 MAX_TRACKED = 500          # сколько бортов помним между запусками
 STALE_SECONDS = 60 * 60    # если борт не виден дольше часа - забываем про него
+EVENT_COOLDOWN_SECONDS = 10 * 60  # не повторять событие по одному борту чаще, чем раз в 10 минут
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 # Можно указать несколько ID через запятую, например: 111111111,222222222
@@ -177,6 +178,8 @@ def main():
         callsign = (s[1] or "").strip() or "без позывного"
         on_ground = s[8]
         true_track = s[10]
+        baro_altitude = s[7]
+        vertical_rate = s[11]
         if icao24 is None or on_ground is None:
             continue
 
@@ -189,10 +192,30 @@ def main():
             event_kind = "departure"
         elif was_on_ground is False and on_ground is True:
             event_kind = "arrival"
+        elif prev is None and on_ground is False:
+            # борт впервые замечен уже в воздухе - OpenSky мог не поймать его на земле.
+            # если летит низко и явно набирает высоту - считаем это взлётом.
+            if (
+                baro_altitude is not None and baro_altitude < 1500
+                and vertical_rate is not None and vertical_rate > 2.5
+            ):
+                event_kind = "departure"
 
-        tracked[icao24] = {"on_ground": on_ground, "last_seen": now}
+        last_event_time = prev.get("last_event_time", 0) if prev else 0
+        in_cooldown = (now - last_event_time) < EVENT_COOLDOWN_SECONDS
+
+        new_tracked_entry = {"on_ground": on_ground, "last_seen": now}
+        if prev and "last_event_time" in prev:
+            new_tracked_entry["last_event_time"] = prev["last_event_time"]
+
+        if event_kind and in_cooldown:
+            # флаг просто задребезжал (шум ADS-B) - не считаем это новым событием
+            event_kind = None
+
+        tracked[icao24] = new_tracked_entry
 
         if event_kind:
+            new_tracked_entry["last_event_time"] = now
             model, category = get_aircraft_info(icao24)
             if category not in WATCH_CATEGORIES:
                 continue
