@@ -7,8 +7,8 @@ import requests
 AIRPORT_ICAO = "EPWA"
 AIRPORT_LAT = 52.1657
 AIRPORT_LON = 20.9671
-BOX_LAT_PAD = 0.09   # ~10 км по широте
-BOX_LON_PAD = 0.14   # ~10 км по долготе на этой широте
+BOX_LAT_PAD = 0.14   # ~16 км по широте
+BOX_LON_PAD = 0.22   # ~16 км по долготе на этой широте
 
 STATE_FILE = "state.json"
 MAX_TRACKED = 500          # сколько бортов помним между запусками
