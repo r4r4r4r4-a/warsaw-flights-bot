@@ -183,6 +183,9 @@ def main():
         if icao24 is None or on_ground is None:
             continue
 
+        if icao24 in seen_this_run:
+            # OpenSky иногда отдаёт один борт дважды в одном ответе - берём только первую запись
+            continue
         seen_this_run.add(icao24)
         prev = tracked.get(icao24)
         was_on_ground = prev.get("on_ground") if prev else None
