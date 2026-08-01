@@ -42,4 +42,12 @@ jobs:
           git config user.email "actions@github.com"
           git add state.json
           git diff --quiet && git diff --staged --quiet || git commit -m "Update sent flights state"
-          git push
+          for i in 1 2 3 4 5; do
+            if git push; then
+              break
+            fi
+            echo "Push отклонён, пробую снова ($i)..."
+            git fetch origin main
+            git rebase origin/main
+            sleep 2
+          done
