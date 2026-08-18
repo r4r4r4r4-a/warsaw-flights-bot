@@ -21,13 +21,7 @@ CHAT_IDS = [c.strip() for c in os.environ["TELEGRAM_CHAT_ID"].split(",") if c.st
 OPENSKY_CLIENT_ID = os.environ["OPENSKY_CLIENT_ID"]
 OPENSKY_CLIENT_SECRET = os.environ["OPENSKY_CLIENT_SECRET"]
 
-# Какие категории слать: military, bizjet, cargo, passenger (через запятую)
-# Задаётся в GitHub -> Settings -> Secrets and variables -> Actions -> Variables -> FILTER_CATEGORIES
-WATCH_CATEGORIES = {
-    c.strip().lower()
-    for c in os.environ.get("FILTER_CATEGORIES", "military,bizjet,cargo,passenger").split(",")
-    if c.strip()
-}
+# Категории по умолчанию теперь настраиваются командой /filter в Telegram (хранятся в state.json).
 
 BIZJET_TYPES = {
     "GLF4", "GLF5", "GLF6", "GALX", "G150", "G200", "G280",
@@ -56,6 +50,15 @@ CATEGORY_EMOJI = {
     "cargo": "🟤",
     "passenger": "⚪",
 }
+
+CATEGORY_LABELS = {
+    "military": "Военные",
+    "bizjet": "Бизнес-джеты",
+    "cargo": "Грузовые",
+    "passenger": "Пассажирские",
+}
+CATEGORY_ORDER = ["military", "bizjet", "cargo", "passenger"]
+DEFAULT_CATEGORIES = {"military", "bizjet", "cargo", "passenger"}
 
 
 def classify_flight(aircraft_info):
@@ -146,6 +149,109 @@ def send_telegram(text):
             print(f"Telegram error for chat {chat_id}:", r.text)
 
 
+def build_filter_keyboard(selected):
+    rows = []
+    for cat in CATEGORY_ORDER:
+        mark = "✅" if cat in selected else "⬜️"
+        rows.append([{
+            "text": f"{mark} {CATEGORY_LABELS[cat]}",
+            "callback_data": f"toggle:{cat}",
+        }])
+    return {"inline_keyboard": rows}
+
+
+def send_filter_menu(chat_id, selected):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    requests.post(
+        url,
+        json={
+            "chat_id": chat_id,
+            "text": "Выбери, какие категории бортов присылать:",
+            "reply_markup": build_filter_keyboard(selected),
+        },
+        timeout=15,
+    )
+
+
+def edit_filter_menu(chat_id, message_id, selected):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageReplyMarkup"
+    requests.post(
+        url,
+        json={
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reply_markup": build_filter_keyboard(selected),
+        },
+        timeout=15,
+    )
+
+
+def answer_callback(callback_query_id, text=None):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
+    payload = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text
+    requests.post(url, json=payload, timeout=15)
+
+
+def get_telegram_updates(offset):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+    params = {"timeout": 0}
+    if offset:
+        params["offset"] = offset
+    r = requests.get(url, params=params, timeout=15)
+    if r.status_code != 200:
+        return []
+    return r.json().get("result", [])
+
+
+def process_telegram_updates(state):
+    """Обрабатывает команды /filter и нажатия кнопок. Возвращает set категорий."""
+    offset = state.get("last_update_id", 0)
+    selected = set(state.get("categories") or DEFAULT_CATEGORIES)
+
+    updates = get_telegram_updates(offset + 1 if offset else None)
+    for update in updates:
+        state["last_update_id"] = update["update_id"]
+
+        message = update.get("message")
+        if message:
+            chat_id = str(message.get("chat", {}).get("id"))
+            text = (message.get("text") or "").strip()
+            if chat_id not in CHAT_IDS:
+                continue
+            if text.startswith("/filter"):
+                send_filter_menu(chat_id, selected)
+            elif text.startswith("/start") or text.startswith("/help"):
+                send_telegram(
+                    "Привет! Я слежу за взлётами и посадками в аэропорту Варшавы (EPWA).\n"
+                    "Команда /filter — выбрать, какие категории бортов присылать."
+                )
+
+        callback = update.get("callback_query")
+        if callback:
+            chat_id = str(callback.get("message", {}).get("chat", {}).get("id"))
+            message_id = callback.get("message", {}).get("message_id")
+            if chat_id not in CHAT_IDS:
+                continue
+            data = callback.get("data") or ""
+            if data.startswith("toggle:"):
+                cat = data.split(":", 1)[1]
+                if cat in selected:
+                    if len(selected) > 1:
+                        selected.discard(cat)
+                    else:
+                        answer_callback(callback["id"], "Должна остаться хотя бы одна категория")
+                        continue
+                else:
+                    selected.add(cat)
+                answer_callback(callback["id"])
+                edit_filter_menu(chat_id, message_id, selected)
+
+    state["categories"] = sorted(selected)
+    return selected
+
+
 def fetch_states_near_airport(token):
     headers = {"Authorization": f"Bearer {token}"}
     params = {
@@ -168,6 +274,8 @@ def main():
     tracked = state.get("tracked", {})
     token = get_opensky_token()
     now = time.time()
+
+    watch_categories = process_telegram_updates(state)
 
     states = fetch_states_near_airport(token)
     new_events = []
@@ -220,7 +328,7 @@ def main():
         if event_kind:
             new_tracked_entry["last_event_time"] = now
             model, category = get_aircraft_info(icao24)
-            if category not in WATCH_CATEGORIES:
+            if category not in watch_categories:
                 continue
             model = model or "модель неизвестна"
             heading = degrees_to_compass(true_track) if true_track is not None else None
